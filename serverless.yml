@@ -1,0 +1,29 @@
+service: gatekeeper
+provider:
+  name: aws
+  runtime: nodejs8.10
+  stage: "${opt:stage, self:custom.defaultStage}"
+  deploymentBucket: "${ssm:/serverless/global/DEPLOYMENT_BUCKET}"
+  environment:
+    clientId: "${ssm:/gatekeeper/${self:provider.stage}/GITHUB_OAUTH_CLIENT_ID}"
+  region: us-east-1
+custom:
+  defaultStage: development
+package:
+  include:
+    - lambda/**
+functions:
+  authenticator:
+    handler: lambda/authenticator.handler
+    environment:
+      authenticationUrl: "https://github.com/login/oauth/access_token"
+      clientSecret: "${ssm:/gatekeeper/${self:provider.stage}/GITHUB_OAUTH_CLIENT_SECRET~true}"
+      allowedOrigins: "${ssm:/gatekeeper/${self:provider.stage}/ALLOWED_ORIGINS~true}"
+    timeout: 30
+  authorizer:
+    handler: lambda/authorizer.handler
+    environment:
+      userUrl: "https://api.github.com/user"
+      teamUrlBase: "https://api.github.com/teams/888007"
+      genericApiResourceArn: "${ssm:/gatekeeper/${self:provider.stage}/GENERIC_API_RESOURCE_ARN}"
+    timeout: 30

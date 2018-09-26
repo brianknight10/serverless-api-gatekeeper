@@ -1,0 +1,264 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates the backing resources to host the API service
+
+Parameters:
+  Environment:
+    Description: Environment
+    Type: String
+    Default: production
+  Service:
+    Description: Service
+    Type: String
+    Default: api
+  AuthenticatorArn:
+    Description: ARN for the authenticator Lambda function
+    Type: String
+  AuthorizerArn:
+    Description: ARN for the authorizer Lambda function
+    Type: String
+  APIArn:
+    Description: ARN for the API Lambda function
+    Type: String
+  APIHostedZoneName:
+    Description: Name for the API DNS zone
+    Type: String
+  APISubdomain:
+    Description: Subdomain for API
+    Type: String
+  CertificateArn:
+    Description: ARN for ACM certificate
+    Type: String
+
+Resources:
+  APIGatewayIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+          Action: sts:AssumeRole
+
+  OAuthApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${Service}-${Environment}-oauth"
+      Parameters:
+        endpointConfigurationTypes: EDGE
+
+  OAuthLoginResource: 
+    Type: AWS::ApiGateway::Resource
+    Properties: 
+      RestApiId: !Ref OAuthApi
+      ParentId: !GetAtt [OAuthApi, RootResourceId]
+      PathPart: "login"
+
+  OAuthLoginOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      AuthorizationType: NONE
+      RestApiId: !Ref OAuthApi
+      ResourceId: !Ref OAuthLoginResource
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          "application/json": "{ \"statusCode\": 200 }"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              "application/json": "{ \"statusCode\": 200 }"
+            SelectionPattern: \d{3}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            "application/json": "Empty"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  OAuthLoginPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      AuthorizationType: NONE
+      RestApiId: !Ref OAuthApi
+      ResourceId: !Ref OAuthLoginResource
+      HttpMethod: POST
+      Integration:
+        Type: AWS_PROXY
+        Credentials: !GetAtt APIGatewayIAMRole.Arn
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Join:
+            - ""
+            - 
+              - "arn:aws:apigateway:"
+              - Ref: "AWS::Region"
+              - ":lambda:path/2015-03-31/functions/"
+              - Ref: "AuthenticatorArn"
+              - "/invocations"
+
+  OAuthDeployment: 
+    DependsOn: OAuthLoginPostMethod
+    Type: AWS::ApiGateway::Deployment
+    Properties: 
+      RestApiId: !Ref OAuthApi
+
+  OAuthLiveStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref OAuthDeployment
+      RestApiId: !Ref OAuthApi
+      StageName: live
+
+  ProxyApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${Service}-${Environment}"
+      Parameters:
+        endpointConfigurationTypes: REGIONAL
+
+  ProxyResource: 
+    Type: AWS::ApiGateway::Resource
+    Properties: 
+      RestApiId: !Ref ProxyApi
+      ParentId: !GetAtt [ProxyApi, RootResourceId]
+      PathPart: "{proxy+}"
+
+  ProxyOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      AuthorizationType: NONE
+      RestApiId: !Ref ProxyApi
+      ResourceId: !Ref ProxyResource
+      HttpMethod: OPTIONS
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          "application/json": "{ \"statusCode\": 200 }"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'DELETE,GET,OPTIONS,PATCH,POST,PUT'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              "application/json": "{ \"statusCode\": 200 }"
+            SelectionPattern: \d{3}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            "application/json": "Empty"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ProxyAnyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ProxyApi
+      ResourceId: !Ref ProxyResource
+      HttpMethod: ANY
+      AuthorizerId: !Ref Authorizer
+      AuthorizationType: CUSTOM
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: AWS_PROXY
+        Credentials: !GetAtt APIGatewayIAMRole.Arn
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Join:
+            - ""
+            - 
+              - "arn:aws:apigateway:"
+              - Ref: "AWS::Region"
+              - ":lambda:path/2015-03-31/functions/"
+              - Ref: "APIArn"
+              - "/invocations"
+        RequestParameters:
+          integration.request.querystring.principal_id: context.authorizer.principalId
+          integration.request.path.proxy: 'method.request.path.proxy'
+  
+  ProxyDeployment: 
+    DependsOn: ProxyAnyMethod
+    Type: AWS::ApiGateway::Deployment
+    Properties: 
+      RestApiId: !Ref ProxyApi
+
+  ProxyLiveStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref ProxyDeployment
+      RestApiId: !Ref ProxyApi
+      StageName: live
+
+  Authorizer: 
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      AuthorizerResultTtlInSeconds: 300
+      AuthorizerCredentials: !GetAtt APIGatewayIAMRole.Arn
+      AuthorizerUri: 
+        Fn::Join:
+          - ""
+          - 
+            - "arn:aws:apigateway:"
+            - Ref: "AWS::Region"
+            - ":lambda:path/2015-03-31/functions/"
+            - Ref: "AuthorizerArn"
+            - "/invocations"
+      IdentitySource: method.request.header.Authorization
+      Name: gatekeeper
+      RestApiId: !Ref ProxyApi
+      Type: TOKEN
+
+  APIDomain:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Sub "${APISubdomain}.${APIHostedZoneName}"
+      EndpointConfiguration:
+        Types:
+          - EDGE
+      CertificateArn: !Ref CertificateArn
+
+  OAuthMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      BasePath: "oauth"
+      DomainName: !Ref APIDomain
+      RestApiId: !Ref OAuthApi
+      Stage: !Ref OAuthLiveStage
+
+  ProxyMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      BasePath: "api"
+      DomainName: !Ref APIDomain
+      RestApiId: !Ref ProxyApi
+      Stage: !Ref ProxyLiveStage
+
+  APIDNS:
+    Type: AWS::Route53::RecordSet
+    DependsOn: APIDomain
+    Properties:
+      HostedZoneName: !Sub "${APIHostedZoneName}."
+      Name: !Sub "${APISubdomain}.${APIHostedZoneName}"
+      Type: CNAME
+      TTL: 60
+      ResourceRecords:
+        - !GetAtt APIDomain.DistributionDomainName
